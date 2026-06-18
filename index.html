@@ -151,6 +151,7 @@
       <div class="tab active" data-tab="generate">📝 문제 생성</div>
       <div class="tab" data-tab="quiz">🎯 모의 풀기</div>
       <div class="tab" data-tab="saved">📚 내 문제집</div>
+      <div class="tab" data-tab="history">🕘 출제 기록</div>
     </div>
 
     <!-- 문제 생성 탭 -->
@@ -258,6 +259,18 @@
       </div>
     </div>
 
+    <!-- 출제 기록 탭 -->
+    <div class="tab-content" id="tab-history">
+      <div class="panel">
+        <div class="panel-title">🕘 출제 기록</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+          <span style="font-size:13px;color:var(--muted)" id="historyCount"></span>
+          <button class="btn btn-red btn-sm" id="clearAllHistory">🗑 전체 삭제</button>
+        </div>
+        <div id="historyList"></div>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -275,7 +288,7 @@
   // ✅ 여기에 본인 Firebase 설정값을 붙여넣으세요
   // Firebase 콘솔 → 프로젝트 설정 → 내 앱 → SDK 설정에서 복사
   // ========================================================
- const firebaseConfig = {
+  const firebaseConfig = {
   apiKey: "AIzaSyBQF8mJpDzKQMQ2wwSn4E07XB58-9CuyUo",
   authDomain: "gen-lang-client-0835859727.firebaseapp.com",
   databaseURL: "https://gen-lang-client-0835859727-default-rtdb.firebaseio.com",
@@ -287,8 +300,7 @@
 };
 
   // ✅ Apps Script 배포 URL을 붙여넣으세요
-  const GAS_URL = 'https://script.google.com/macros/s/AKfycbyefm5oGQhMCJrouXLFcpZpmhdMQvXp5sKJl8-3mWgS2_dOxt-X-4unGqJOpIDlzu1k/exec';
-
+  const GAS_URL = 'https://script.google.com/macros/s/AKfycbzH3ccLMEKBgBgPbr0zGXgUhBz6NTK9Q7Btn9p9bbKLHwWIm85H-tWdRj-PhFrpfsGy/exec';
   // ========================================================
 
   const app  = initializeApp(firebaseConfig);
@@ -354,6 +366,7 @@
       tab.classList.add('active');
       document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
       if (tab.dataset.tab === 'saved') startSaved();
+      if (tab.dataset.tab === 'history') startHistory();
     });
   });
 
@@ -388,6 +401,19 @@
       if (!data.questions || !data.questions.length) throw new Error('문제를 생성하지 못했습니다.');
       renderGeneratedQuestions(data.questions, subject, diff);
       setS('genStatus', 'ok', `${data.questions.length}개 문제 생성 완료!`);
+
+      // 출제 기록 Firebase 자동 저장
+      if (currentUser) {
+        try {
+          const logRef = push(ref(db, 'users/' + currentUser.uid + '/history'));
+          await set(logRef, {
+            subject, qtype, diff, exam, count,
+            extra:     extra || '',
+            questions: data.questions,
+            createdAt: new Date().toLocaleString('ko-KR')
+          });
+        } catch(e) { console.error('기록 저장 실패:', e); }
+      }
     } catch(e) {
       setS('genStatus', 'err', '오류: ' + e.message);
     } finally {
@@ -424,10 +450,6 @@
           <button class="btn btn-green btn-sm" onclick="saveQuestion('${qJsonStr}','${esc(subject)}','${esc(diff)}')">💾 저장</button>
           <button class="btn btn-blue btn-sm" id="tts-btn-${i}" onclick="readQuestion(this, '${encodeURIComponent(buildTTSText(q))}', ${i})">🔊 문제 읽기</button>
         </div>
-        <div id="tts-player-${i}" style="display:none;margin-top:10px">
-          <audio id="tts-audio-${i}" controls style="width:100%"></audio>
-          <a id="tts-dl-${i}" class="btn btn-ghost btn-sm" style="margin-top:6px" href="#" download="question-${i+1}.mp3">⬇ mp3 저장</a>
-        </div>
         <div class="q-answer-box">
           <strong>정답:</strong> ${esc(q.answer || '')}<br/>
           <strong>해설:</strong> ${esc(q.explanation || '')}
@@ -448,11 +470,7 @@
     li.classList.add('selected');
   };
 
-  window.sendToTTS = function(encoded) {
-    // 더 이상 사용 안 함 (인라인 TTS로 대체)
-  };
-
-  // 문제 텍스트 → TTS용 문자열 조합
+  // 문제 텍스트 → 읽기용 문자열 조합
   function buildTTSText(q) {
     let text = q.question || '';
     if (q.choices && q.choices.length) {
@@ -462,37 +480,38 @@
     return text;
   }
 
-  // 문제 카드에서 바로 읽기
-  window.readQuestion = async function(btn, encoded, idx) {
+  // 브라우저 내장 음성으로 즉시 읽기 (로딩 없음)
+  let currentUtterance = null;
+
+  window.readQuestion = function(btn, encoded, idx) {
     const text = decodeURIComponent(encoded);
-    btn.disabled = true;
-    btn.textContent = '⏳ 생성 중...';
-    const playerBox = document.getElementById('tts-player-' + idx);
-    playerBox.style.display = 'none';
 
-    try {
-      const res  = await fetch(GAS_URL, {
-        method: 'POST',
-        body: JSON.stringify({ type: 'tts', text, model: 'tts-1', voice: 'nova', speed: 0.9 })
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      if (!data.audioBase64) throw new Error('음성 데이터 없음');
-
-      const url = b64toUrl(data.audioBase64, 'audio/mpeg');
-      const audio = document.getElementById('tts-audio-' + idx);
-      const dl    = document.getElementById('tts-dl-' + idx);
-      audio.src   = url;
-      dl.href     = url;
-      playerBox.style.display = 'block';
-      audio.play();
-      btn.textContent = '🔊 다시 듣기';
-    } catch(e) {
-      alert('음성 생성 오류: ' + e.message);
-      btn.textContent = '🔊 문제 읽기';
-    } finally {
-      btn.disabled = false;
+    // 이미 읽는 중이면 중지
+    if (currentUtterance && speechSynthesis.speaking) {
+      speechSynthesis.cancel();
+      if (btn.textContent.includes('중지')) {
+        btn.textContent = '🔊 문제 읽기';
+        currentUtterance = null;
+        return;
+      }
     }
+
+    // 다른 버튼들 초기화
+    document.querySelectorAll('[id^="tts-btn-"]').forEach(b => {
+      b.textContent = '🔊 문제 읽기';
+    });
+
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang  = 'ko-KR';
+    utter.rate  = 0.9;
+    utter.pitch = 1.0;
+
+    utter.onstart = () => { btn.textContent = '⏹ 중지'; };
+    utter.onend   = () => { btn.textContent = '🔊 문제 읽기'; currentUtterance = null; };
+    utter.onerror = () => { btn.textContent = '🔊 문제 읽기'; currentUtterance = null; };
+
+    currentUtterance = utter;
+    speechSynthesis.speak(utter);
   };
 
   // ── Firebase 저장 (encodeURIComponent 방식으로 안전하게) ──
@@ -600,6 +619,87 @@
   };
 
   document.getElementById('refreshSaved').addEventListener('click', startSaved);
+
+  // ── 출제 기록 ──
+  let historyRef = null;
+
+  function startHistory() {
+    if (!currentUser) return;
+    if (historyRef) { off(historyRef); historyRef = null; }
+    historyRef = ref(db, 'users/' + currentUser.uid + '/history');
+    onValue(historyRef, snap => {
+      const data = snap.val() || {};
+      renderHistory(data);
+    });
+  }
+
+  function renderHistory(data) {
+    const list    = document.getElementById('historyList');
+    const countEl = document.getElementById('historyCount');
+    list.innerHTML = '';
+    const entries = Object.entries(data);
+    countEl.textContent = `총 ${entries.length}회 출제`;
+
+    if (!entries.length) {
+      list.innerHTML = '<div class="empty">아직 출제 기록이 없습니다.<br>문제를 생성하면 자동으로 여기에 기록됩니다.</div>';
+      return;
+    }
+
+    entries.reverse().forEach(([id, log]) => {
+      const div = document.createElement('div');
+      div.className = 'saved-item';
+      div.innerHTML = `
+        <div>
+          <h4>${esc(log.subject||'')} · ${esc(log.exam||'')} · ${esc(log.qtype||'')} · 난이도 ${esc(log.diff||'')} · ${log.count||0}문제</h4>
+          <p>${(log.questions||[]).map((q,i) => `${i+1}. ${(q.question||'').slice(0,40)}…`).join(' / ')}</p>
+          <div class="saved-meta">${log.createdAt||''} ${log.extra ? '· '+log.extra : ''}</div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+          <button class="btn btn-ghost btn-sm" onclick="expandHistory('${id}')">펼치기</button>
+          <button class="btn btn-red btn-sm" onclick="deleteHistory('${id}')">삭제</button>
+        </div>
+      `;
+      list.appendChild(div);
+
+      const detail = document.createElement('div');
+      detail.id = 'hist-detail-' + id;
+      detail.style.display = 'none';
+      detail.style.marginBottom = '16px';
+      (log.questions || []).forEach((q, i) => {
+        const qDiv = document.createElement('div');
+        qDiv.className = 'q-paper';
+        qDiv.style.marginTop = '10px';
+        qDiv.innerHTML = `
+          <div class="q-header"><span class="q-num">${i+1}번</span></div>
+          <div class="q-body">${esc(q.question||'')}</div>
+          ${q.choices&&q.choices.length ? `<ul class="q-choices">${q.choices.map((c,ci)=>`<li><span class="choice-num">${ci+1}</span><span>${esc(c)}</span></li>`).join('')}</ul>` : ''}
+          <div class="q-answer-box show" style="margin-top:10px">
+            <strong>정답:</strong> ${esc(q.answer||'')}<br/>
+            <strong>해설:</strong> ${esc(q.explanation||'')}
+          </div>
+        `;
+        detail.appendChild(qDiv);
+      });
+      list.appendChild(detail);
+    });
+  }
+
+  window.expandHistory = function(id) {
+    const el = document.getElementById('hist-detail-' + id);
+    if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  };
+
+  window.deleteHistory = async function(id) {
+    if (!currentUser || !confirm('이 출제 기록을 삭제할까요?')) return;
+    try { await remove(ref(db, 'users/' + currentUser.uid + '/history/' + id)); }
+    catch(e) { alert('삭제 실패: ' + e.message); }
+  };
+
+  document.getElementById('clearAllHistory').addEventListener('click', async () => {
+    if (!currentUser || !confirm('출제 기록을 전체 삭제할까요?')) return;
+    try { await remove(ref(db, 'users/' + currentUser.uid + '/history')); }
+    catch(e) { alert('삭제 실패: ' + e.message); }
+  });
 
   // ── 모의 풀기 ──
   document.getElementById('loadQuizBtn').addEventListener('click', () => {
